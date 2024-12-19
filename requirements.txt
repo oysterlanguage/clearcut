@@ -10,3 +10,5 @@ whisperx~=3.1.6
 onnxruntime-gpu~=1.20.1
 diskcache~=5.6.3
 TextGrid~=1.6.1
+ctranslate2==4.4.0
+faster-whisper==1.1.0
