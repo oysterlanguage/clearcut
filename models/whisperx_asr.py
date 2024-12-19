@@ -1,3 +1,4 @@
+import collections
 import pathlib
 
 import librosa
@@ -9,6 +10,9 @@ from tqdm import tqdm
 import sys
 import os
 from contextlib import contextmanager
+from faster_whisper.transcribe import TranscriptionOptions
+from dataclasses import fields
+from collections import namedtuple
 
 
 class WhisperXModel:
@@ -123,6 +127,8 @@ class WhisperXModel:
             language=self.language,
             asr_options=self.asr_options,
         )
+        TranscriptionOptionsNT = namedtuple(TranscriptionOptions.__name__, [field.name for field in fields(TranscriptionOptions)])
+        modelx.options = TranscriptionOptionsNT(**vars(modelx.options))
         model_a, metadata = whisperx.load_align_model(
             language_code=self.language, device=self.device
         )

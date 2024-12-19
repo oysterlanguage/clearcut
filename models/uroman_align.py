@@ -378,7 +378,7 @@ def load_model_dict():
             model_path_name,
         )
         assert os.path.exists(model_path_name)
-    state_dict = torch.load(model_path_name, map_location="cpu")
+    state_dict = torch.load(model_path_name, map_location="cpu",weights_only=True)
 
     model = wav2vec2_model(
         extractor_mode="layer_norm",
@@ -826,9 +826,9 @@ def text_normalize(
         complete_digit_pattern = (
             r"^"
             + digits_pattern
-            + "(?=\s)|(?<=\s)"
+            + r"(?=\s)|(?<=\s)"
             + digits_pattern
-            + "(?=\s)|(?<=\s)"
+            + r"(?=\s)|(?<=\s)"
             + digits_pattern
             + "$"
         )

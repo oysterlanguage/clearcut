@@ -13,6 +13,9 @@ import statistics
 import numpy as np
 import soundfile as sf
 
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 cache = Cache("cache")
 # Create a custom logger
 logger = logging.getLogger("custom_logger")
