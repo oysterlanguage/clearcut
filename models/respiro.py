@@ -204,14 +204,10 @@ class BreathDetector:
                     if split[-1] * 0.01 > split[0] * 0.01:
                         start = round(split[0] * 0.01, 3) + (offset_frames / 16000)
                         end = round(split[-1] * 0.01, 3) + (offset_frames / 16000)
-                        peak = find_maxima_in_range(valleys=valleys, start_time=start, end_time=end)
-                        tree.add(
-                            Interval(
-                                start,
-                                end,
-                                data=peak
-                            )
+                        peak = find_maxima_in_range(
+                            valleys=valleys, start_time=start, end_time=end
                         )
+                        tree.add(Interval(start, end, data=peak))
             offset_frames += chunk_size_frames - overlap_frames
         tree.merge_overlaps(strict=False)
         return tree
@@ -245,7 +241,9 @@ class BreathDetector:
             left_time = interval.begin
             right_time = interval.end
             if len(timestamps) == 0:
-                logger.info(f"No timestamps found {interval.begin:.3f} - {interval.end:.3f}")
+                logger.info(
+                    f"No timestamps found {interval.begin:.3f} - {interval.end:.3f}"
+                )
 
             elif len(timestamps) == 1:
                 left_time = timestamps[0].begin

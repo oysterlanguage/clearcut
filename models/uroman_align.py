@@ -41,6 +41,7 @@ def find_minimum_in_range(valleys: dict, start_time, end_time):
 
     return min_valley
 
+
 def find_maxima_in_range(valleys: dict, start_time, end_time):
     start_sec = int(start_time)
     end_sec = int(end_time)
@@ -59,7 +60,8 @@ def find_maxima_in_range(valleys: dict, start_time, end_time):
 
     return max_valley
 
-def find_threshold_crossing(valleys:dict, start, end, threshold, direction="right"):
+
+def find_threshold_crossing(valleys: dict, start, end, threshold, direction="right"):
     start_sec = int(start)
     end_sec = int(end)
 
@@ -183,7 +185,7 @@ def get_valley_dict(data, num_items=10):
     # Helper function to calculate average for the previous num_items
     def get_previous_average(index, data, num_items):
         start = max(0, index - num_items)
-        values = data[start:index + 1]
+        values = data[start : index + 1]
         return sum([val[2] for val in values]) / len(values)
 
     for i in range(len(data)):
@@ -253,7 +255,10 @@ def filter_sequential(data) -> dict:
         (
             round(float(result[0][1]), 3),
             round(float(result[0][2]), 5),
-            round(float((result[0][2] + result[0][2] + result[0][2] + result[1][2]) / 4), 5),
+            round(
+                float((result[0][2] + result[0][2] + result[0][2] + result[1][2]) / 4),
+                5,
+            ),
         )
     )
     for i in range(len(result) - 2):
@@ -264,8 +269,18 @@ def filter_sequential(data) -> dict:
             (
                 round(float(current_value[1]), 3),
                 round(float(current_value[2]), 5),
-                round(float((prev_value[2] + current_value[2] + current_value[2] + next_value[2])
-                / 4), 5),
+                round(
+                    float(
+                        (
+                            prev_value[2]
+                            + current_value[2]
+                            + current_value[2]
+                            + next_value[2]
+                        )
+                        / 4
+                    ),
+                    5,
+                ),
             )
         )
 
@@ -273,7 +288,12 @@ def filter_sequential(data) -> dict:
         (
             round(float(result[-1][1]), 3),
             round(float(result[-1][2]), 5),
-            round(float((result[-2][2] + result[-1][2] + result[-1][2] + result[-1][2]) / 4), 5),
+            round(
+                float(
+                    (result[-2][2] + result[-1][2] + result[-1][2] + result[-1][2]) / 4
+                ),
+                5,
+            ),
         )
     )
     return time_dict
@@ -497,7 +517,7 @@ inverted_question_mark = r"\u00BF"
 
 
 # Hindi
-hindi_danda = u"\u0964"
+hindi_danda = "\u0964"
 
 # Egyptian Arabic
 # arabic_percent = r"\u066A"
@@ -931,6 +951,7 @@ def get_alignments(
     segments = merge_repeats(path, {v: k for k, v in dictionary.items()})
     return segments, stride
 
+
 def quick_align(audio, transcripts, lang="en"):
     transcripts = [segment.strip() for segment in transcripts if segment.strip()]
     transcripts = [
@@ -971,7 +992,9 @@ def quick_align(audio, transcripts, lang="en"):
     valleys = get_valley_tree(waveform, sample_rate)
     valleys = filter_sequential(valleys)
     results = []
-    for i, t in enumerate([segment_data[i:i+3] for i in range(0, len(segment_data) - 2, 2)]):
+    for i, t in enumerate(
+        [segment_data[i : i + 3] for i in range(0, len(segment_data) - 2, 2)]
+    ):
         start_span = t[0][3]
         end_span = t[-1][3]
         start_seg_start_idx = start_span[0].start
@@ -986,8 +1009,12 @@ def quick_align(audio, transcripts, lang="en"):
         end_audio_start_sec = end_seg_start_idx * stride / 1000
         end_audio_end_sec = end_seg_end_idx * stride / 1000
 
-        start_lowest = find_minimum_in_range(valleys, start_audio_start_sec, start_audio_end_sec)
-        end_lowest = find_minimum_in_range(valleys, end_audio_start_sec, end_audio_end_sec)
+        start_lowest = find_minimum_in_range(
+            valleys, start_audio_start_sec, start_audio_end_sec
+        )
+        end_lowest = find_minimum_in_range(
+            valleys, end_audio_start_sec, end_audio_end_sec
+        )
 
         if end_lowest is None:
             actual_end = round(float(end_audio_end_sec), 3)
@@ -1008,7 +1035,13 @@ def quick_align(audio, transcripts, lang="en"):
     return results
 
 
-def align(audio, transcription_segments, valleys , lang="eng" , breaths: intervaltree.IntervalTree = None):
+def align(
+    audio,
+    transcription_segments,
+    valleys,
+    lang="eng",
+    breaths: intervaltree.IntervalTree = None,
+):
     transcripts = [segment["text"].strip() for segment in transcription_segments]
     transcripts = [
         item for pair in zip(transcripts, [""] * len(transcripts)) for item in pair
@@ -1070,10 +1103,14 @@ def align(audio, transcription_segments, valleys , lang="eng" , breaths: interva
             else:
                 start = start_audio_end_sec
                 if breaths:
-                    overlaps = breaths.overlap(start_audio_end_sec, transcription_segments[i].get("start"))
+                    overlaps = breaths.overlap(
+                        start_audio_end_sec, transcription_segments[i].get("start")
+                    )
                     for overlap in overlaps:
                         peak = overlap.data
-                        if peak and start_audio_end_sec < peak[0] < transcription_segments[i].get("start"):
+                        if peak and start_audio_end_sec < peak[
+                            0
+                        ] < transcription_segments[i].get("start"):
                             start = peak[0]
                         else:
                             pass
@@ -1111,9 +1148,21 @@ def align(audio, transcription_segments, valleys , lang="eng" , breaths: interva
         if actual_start > actual_end:
             actual_start = round(float(start_audio_start_sec), 3)
         if abs(start_audio_end_sec - transcription_segments[i].get("start")) < 0.05:
-            print("small distance", start_audio_end_sec-transcription_segments[i].get("start"), start_audio_end_sec, transcription_segments[i].get("start"), start_db)
-        if abs(end_audio_start_sec- end_audio_end_sec) < 0.05:
-            print("small distance", end_audio_start_sec-end_audio_end_sec, end_audio_start_sec, end_audio_end_sec, end_db)
+            print(
+                "small distance",
+                start_audio_end_sec - transcription_segments[i].get("start"),
+                start_audio_end_sec,
+                transcription_segments[i].get("start"),
+                start_db,
+            )
+        if abs(end_audio_start_sec - end_audio_end_sec) < 0.05:
+            print(
+                "small distance",
+                end_audio_start_sec - end_audio_end_sec,
+                end_audio_start_sec,
+                end_audio_end_sec,
+                end_db,
+            )
 
         lowest_data = {
             "start": {

@@ -71,6 +71,7 @@ def asr(audio):
     results = whisperx_transcribe(temp_audio)
     return results
 
+
 def byob_transcribe(audio, transcripts, language="en"):
     segments = quick_align(audio, transcripts, language)
     # resample to 16k
@@ -114,9 +115,6 @@ def get_alignment(audio, segments, valleys, breaths=None):
     return list(zip(segments, alignment)), sorted(ranges)
 
 
-from textgrid import TextGrid, IntervalTier
-
-
 def create_textgrid_from_data(dictionary, output_path):
     # Initialize a TextGrid object
     tg = TextGrid()
@@ -138,6 +136,7 @@ def create_textgrid_from_data(dictionary, output_path):
     # Write the TextGrid to a file
     tg.write(output_path)
     logger.info(f"TextGrid saved to {output_path}")
+
 
 @time_logger
 def process(audio_path):
@@ -197,8 +196,20 @@ def process(audio_path):
     for i in range(len(alignment)):
         start = alignment[i][1].get("start")
         end = alignment[i][1].get("end")
-        start_crossing = find_threshold_crossing(valleys=raw_valleys, start=start,end=end, threshold=threshold, direction="right")
-        end_crossing = find_threshold_crossing(valleys=raw_valleys, start=start,end=end, threshold=threshold, direction="left")
+        start_crossing = find_threshold_crossing(
+            valleys=raw_valleys,
+            start=start,
+            end=end,
+            threshold=threshold,
+            direction="right",
+        )
+        end_crossing = find_threshold_crossing(
+            valleys=raw_valleys,
+            start=start,
+            end=end,
+            threshold=threshold,
+            direction="left",
+        )
         if start_crossing is None:
             alignment[i][1]["padding_start"] = start
         else:
@@ -214,7 +225,7 @@ def process(audio_path):
     # output_path += "_segments"
     # segment_with_minima(audio, alignment, output_path, padding)
 
-    padding = .15
+    padding = 0.15
     output_path = audio.get("path")
     output_path = output_path.replace("data/audio", "data/processed")
     output_path += "_segments_test"
@@ -241,17 +252,31 @@ def process(audio_path):
     mean = statistics.mean(breath_peaks)
     std_dev = statistics.stdev(breath_peaks)
 
-    possible_breath_misses = [breath.data for breath in sorted(breaths) if breath.data and breath.data[1] < (mean - (std_dev * 1.5))]
-    print(f"These breaths are unusually quiet and could affect alignment: {possible_breath_misses}")
+    possible_breath_misses = [
+        breath.data
+        for breath in sorted(breaths)
+        if breath.data and breath.data[1] < (mean - (std_dev * 1.5))
+    ]
+    print(
+        f"These breaths are unusually quiet and could affect alignment: {possible_breath_misses}"
+    )
 
-    edge_db = [segment[1]["lowest"]["start"]["db"] for segment in alignment] + [segment[1]["lowest"]["end"]["db"] for segment in alignment]
+    edge_db = [segment[1]["lowest"]["start"]["db"] for segment in alignment] + [
+        segment[1]["lowest"]["end"]["db"] for segment in alignment
+    ]
     mean = statistics.mean(edge_db)
     std_dev = statistics.stdev(edge_db)
 
     # we may want to join on loud splits
-    possible_edge_misses = [segment for segment in alignment if segment[1]["lowest"]["start"]["db"] > (mean + (std_dev * 3)) or segment[1]["lowest"]["end"]["db"] > (mean + (std_dev * 3))]
-    print(f"These segments end unusually loud and could cause clipping: {possible_edge_misses}")
-
+    possible_edge_misses = [
+        segment
+        for segment in alignment
+        if segment[1]["lowest"]["start"]["db"] > (mean + (std_dev * 3))
+        or segment[1]["lowest"]["end"]["db"] > (mean + (std_dev * 3))
+    ]
+    print(
+        f"These segments end unusually loud and could cause clipping: {possible_edge_misses}"
+    )
 
     logger.info("Step 5: Create TextGrid")
     create_textgrid_from_data(
@@ -307,7 +332,11 @@ def segment_with_threshold(audio, alignment, output_path, padding):
             y_padded = np.concatenate((left_padding, y_segment, right_padding))
 
             # Save the padded audio segment as a WAV file
-            sf.write(os.path.join(output_path, f"segment{i}.wav"), y_padded, audio.get("sample_rate"))
+            sf.write(
+                os.path.join(output_path, f"segment{i}.wav"),
+                y_padded,
+                audio.get("sample_rate"),
+            )
         except Exception as e:
             logger.error(f"Error processing segment {alignment[i]}")
             logger.error(e)
@@ -338,7 +367,11 @@ def segment_with_minima(audio, alignment, output_path, padding):
         y_padded = np.concatenate((left_padding, y_segment, right_padding))
 
         # Save the padded audio segment as a WAV file
-        sf.write(os.path.join(output_path, f"segment{i}.wav"), y_padded, audio.get("sample_rate"))
+        sf.write(
+            os.path.join(output_path, f"segment{i}.wav"),
+            y_padded,
+            audio.get("sample_rate"),
+        )
 
 
 def detect_gpu():
