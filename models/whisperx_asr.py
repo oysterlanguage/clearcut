@@ -25,7 +25,6 @@ class WhisperXModel:
         model,
         tokenizer=None,
         device: Union[int, str, "torch.device"] = -1,
-        whisper_arch: str = "large-v3",
         framework="pt",
         language: Optional[str] = None,
         metadata: Optional[dict] = None,
@@ -57,7 +56,7 @@ class WhisperXModel:
         self.vad_params = {}
         self.tokenizer = tokenizer
         self.device = device
-        self.whisper_arch = whisper_arch
+        self.whisper_arch = model
         self.framework = framework
         self.language = language
         self.model_a = model_a

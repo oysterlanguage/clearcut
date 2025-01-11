@@ -1,0 +1,42 @@
+# config.yaml
+general:
+  debug: false
+  input_folder: data/audio # path to the input audio files
+  output_path: data/segments # path to save the output segments
+  train_path: data/train # path to save the train file in "segments | transcript" format
+  log_level: DEBUG
+  device: auto   # can be 'cuda', 'cpu', or 'auto' to detect GPU
+  sample_rate: 44100 # sample rate of the output segments
+
+whisperx_asr:
+    model: "large-v3"
+    language: "en"
+    compute_type: "float16"
+    suppress_numerals: True
+    threads: 1
+    asr_options:
+
+separate_fast:
+    enabled: True
+    model_path: models/UVR-MDX-NET-Inst_HQ_3.onnx
+    denoise: True
+    margin: 44100
+    chunks: 15
+    n_fft: 6144
+    dim_t: 8
+    dim_f: 3072
+
+respiro:
+    model_path: models/respiro-en.pt
+    threshold: 0.064
+    min_length: 10
+
+find_threshold_crossing:
+    threshold: -60 # dB to use for threshold crossing this determines the start and end of a segment
+
+segment_with_threshold:
+    padding: .15 # padding to add to the start and end of a segment in seconds
+    symmetrical: False # if false we dynamically pad the end and use the padding value for the start
+
+create_textgrid:
+    enabled: True  # create a textgrid file for each audio file to show how we performed segmentation

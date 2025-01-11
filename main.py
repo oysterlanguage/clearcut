@@ -13,6 +13,8 @@ from textgrid import TextGrid, IntervalTier
 import statistics
 import numpy as np
 import soundfile as sf
+import yaml
+import argparse
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -119,7 +121,7 @@ def get_alignment(audio, segments, valleys, breaths=None):
     return list(zip(segments, alignment)), sorted(ranges)
 
 
-def create_textgrid_from_data(dictionary, output_path):
+def create_textgrid(dictionary, output_path):
     # Initialize a TextGrid object
     tg = TextGrid()
 
@@ -188,7 +190,7 @@ def dbfs(waveform):
 
 
 @time_logger
-def standardization(audio, sample_rate=0, start_s=0, duration_s=None):
+def standardization(audio, sample_rate=None, start_s=0, duration_s=None):
     """
     Preprocess the audio file using librosa instead of pydub.
     Operations include setting sample rate, converting to mono, trimming,
@@ -225,7 +227,7 @@ def standardization(audio, sample_rate=0, start_s=0, duration_s=None):
         # librosa.load automatically converts to float32 and can handle trimming
         # offset=start_s sets the start position, duration=duration_s sets the length
         waveform, sr = librosa.load(
-            audio, mono=True, offset=start_s, duration=duration_s
+            audio, mono=True, offset=start_s, duration=duration_s, sr=sample_rate
         )
         sample_rate = sr
     # If audio is a NumPy array (raw waveform)
@@ -278,23 +280,35 @@ def standardization(audio, sample_rate=0, start_s=0, duration_s=None):
         "waveform": waveform,
         "path": name,
         "sample_rate": sample_rate,
+        "audio_length": len(waveform) / sample_rate,
     }
 
 
 @time_logger
-def process(audio_path):
+def process(config, audio_path):
+    debug = config.get("general",{}).get("debug", False)
+
     logger.info("Step 0: Load audio")
-    y, sr = librosa.load(audio_path, sr=None)
-    audio = {"waveform": y, "sample_rate": sr, "path": audio_path}
-    audio = standardization(audio_path)
-    separate_predictor1.load_model()
-    audio, no_vocal = source_separation(separate_predictor1, audio)
-    # write no_vocal to file
-    # sf.write(audio_path.replace("audio", "no_vocal"), no_vocal["waveform"], no_vocal["sample_rate"])
-    separate_predictor1.unload_model()
+    # y, sr = librosa.load(audio_path, sr=None)
+    # audio = {"waveform": y, "sample_rate": sr, "path": audio_path}
+
+    logger.info("Step 0: Standardize audio")
+    sample_rate = config.get("general", {}).get("sample_rate", 22000)
+    audio = standardization(audio_path,sample_rate=sample_rate)
+
+    no_vocal = None
+    if config.get("separate_fast", {}).get("enabled", False):
+
+        separate_predictor1.load_model()
+        logger.info("Step 0: Separate audio using separate_fast")
+        audio, no_vocal = source_separation(separate_predictor1, audio)
+
+        # write no_vocal to file
+        # sf.write(audio_path.replace("audio", "no_vocal"), no_vocal["waveform"], no_vocal["sample_rate"])
+        separate_predictor1.unload_model()
 
     if os.path.exists(f"{audio_path}.txt"):
-        logger.info("Step 1: Using provided text instead of ASR")
+        logger.info(f"Step 1: Using provided text instead of ASR {audio_path}.txt")
         if debug:
             with open(f"{audio_path}.txt", "r") as f:
                 segments = f.readlines()
@@ -341,7 +355,8 @@ def process(audio_path):
     logger.info("Step 4: Finegrained alignment")
     alignment, ranges = get_alignment(audio, segments, valleys, breaths)
 
-    threshold = -60
+
+    threshold = config.get("find_threshold_crossing", {}).get("threshold", -60)
     for i in range(len(alignment)):
         start = alignment[i][1].get("start")
         end = alignment[i][1].get("end")
@@ -374,47 +389,36 @@ def process(audio_path):
     # output_path += "_segments"
     # segment_with_minima(audio, alignment, output_path, padding)
 
-    start_padding = 0.15
-    output_path = audio.get("path")
-    output_path = output_path.replace("data/audio", "data/processed")
-    output_path += "_segments"
-    output_path = "data/segments"
+    start_padding = config.get("segment_with_threshold", {}).get("padding", 0.15)
+    symmetrical = config.get("segment_with_threshold", {}).get("symmetrical", False)
+
+    output_path = config.get("general", {}).get("output_path", "data/segments")
+
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+
     segment_with_threshold(
-        audio, alignment, output_path, start_padding, symmetrical=False
+        audio, alignment, output_path, start_padding, symmetrical=symmetrical
     )
 
-    for segment in alignment:
-        # calculate peak and average db level of same time in the no_vocal audio
-        start = segment[1].get("start")
-        end = segment[1].get("end")
-        start_sample = int(start * no_vocal["sample_rate"])
-        end_sample = int(end * no_vocal["sample_rate"])
-        clip = no_vocal["waveform"][start_sample:end_sample]
-        db = dbfs(clip)
-        average_db = np.mean(clip)
-        max_db = np.max(clip)
-        print(
-            f"Segment {segment[0]['text']} has average db level of {average_db} and max db level of {max_db}, and dbfs of {db}"
-        )
-        pass
+    if config.get("separate_fast", {}).get("enabled", False):
+        for segment in alignment:
+            # calculate peak and average db level of same time in the no_vocal audio
+            start = segment[1].get("start")
+            end = segment[1].get("end")
+            start_sample = int(start * no_vocal["sample_rate"])
+            end_sample = int(end * no_vocal["sample_rate"])
+            clip = no_vocal["waveform"][start_sample:end_sample]
+            db = dbfs(clip)
+            average_db = np.mean(clip)
+            max_db = np.max(clip)
+            print(
+                f"Segment {segment[0]['text']} has average db level of {average_db} and max db level of {max_db}, and dbfs of {db}"
+            )
+            pass
 
-    # todo fix issue with multiple sequential words wihh no start or end time
     logger.info("step 5: Fixing missing word start and end times")
-    for index in range(len(asrx_result.get("word_segments")) - 1):
-        if "end" not in asrx_result.get("word_segments")[index]:
-            if index == len(asrx_result.get("word_segments")) - 1:
-                asrx_result.get("word_segments")[index]["end"] = len(y) / sr
-            else:
-                asrx_result.get("word_segments")[index]["end"] = asrx_result.get(
-                    "word_segments"
-                )[index + 1]["start"]
-        if "start" not in asrx_result.get("word_segments")[index]:
-            if index == 0:
-                asrx_result.get("word_segments")[index]["start"] = 0
-            else:
-                asrx_result.get("word_segments")[index]["start"] = asrx_result.get(
-                    "word_segments"
-                )[index - 1]["end"]
+    fix_missing_word_times(asrx_result, audio.get("audio_length"))
 
     breath_peaks = [breath.data[1] for breath in breaths if breath.data]
     if len(breath_peaks) > 1:
@@ -487,8 +491,10 @@ def process(audio_path):
     mixed = breaths | word_intervals
     audio_file_name = os.path.basename(audio_path)
 
-    # save a training file that contains the path to the audio then pipe then the text including <breath> where breaths happen example fileaudio/segment_8.wav|They layer the memory like strata.
-    with open(os.path.join("data/train", f"{audio_file_name}.train.txt"), "w") as f:
+    train_path = config.get("general", {}).get("train_path", "data/train")
+    if not os.path.exists(train_path):
+        os.makedirs(train_path)
+    with open(os.path.join(train_path, f"{audio_file_name}.train.txt"), "w") as f:
         for segment in alignment:
             start = segment[1].get("padding_start")
             end = segment[1].get("padding_end")
@@ -508,37 +514,114 @@ def process(audio_path):
             line = f"{segment[1].get('filename')}|{' '.join(text)}\n"
             f.write(line)
 
-    logger.info("Step 5: Create TextGrid")
-    create_textgrid_from_data(
-        {
-            "words": asrx_result.get("word_segments"),
-            "breaths": [
-                {"start": breath.begin, "end": breath.end, "word": "breath"}
-                for breath in breaths
-            ],
-            "whisperx": [
-                {
-                    "start": segment[0]["start"],
-                    "end": segment[0]["end"],
-                    "word": segment[0]["text"],
-                }
-                for segment in alignment
-            ],
-            "uroman": [
-                {
-                    "start": segment[1]["start"],
-                    "end": segment[1]["end"],
-                    "word": segment[1]["text"],
-                }
-                for segment in alignment
-            ],
-            "split_ranges": [
-                {"start": x.begin, "end": x.end, "word": "range"} for x in ranges
-            ],
-        },
-        f"{audio_path}.TextGrid",
-    )
+    if config.get("create_textgrid", {}).get("enabled", False):
+        logger.info("Step 5: Create TextGrid")
+        create_textgrid(
+            {
+                "words": asrx_result.get("word_segments"),
+                "breaths": [
+                    {"start": breath.begin, "end": breath.end, "word": "breath"}
+                    for breath in breaths
+                ],
+                "whisperx": [
+                    {
+                        "start": segment[0]["start"],
+                        "end": segment[0]["end"],
+                        "word": segment[0]["text"],
+                    }
+                    for segment in alignment
+                ],
+                "uroman": [
+                    {
+                        "start": segment[1]["start"],
+                        "end": segment[1]["end"],
+                        "word": segment[1]["text"],
+                    }
+                    for segment in alignment
+                ],
+                "split_ranges": [
+                    {"start": x.begin, "end": x.end, "word": "range"} for x in ranges
+                ],
+            },
+            f"{audio_path}.TextGrid",
+        )
 
+def fix_missing_word_times(asrx_result, total_audio_duration):
+    """
+    Find consecutive words that lack start/end times, then
+    evenly distribute times between the nearest known timestamps.
+
+    Args:
+        asrx_result (dict): The ASR result dict with a 'word_segments' list.
+        total_audio_duration (float): The total duration of the audio in seconds.
+    """
+    word_segments = asrx_result.get("word_segments", [])
+    n_words = len(word_segments)
+    if n_words == 0:
+        return  # nothing to fix
+
+    # 1. Collect consecutive runs of missing times.
+    #    A "run" is defined as consecutive words that are missing either "start" or "end".
+    runs = []
+    i = 0
+    while i < n_words:
+        # Check if current word is missing times
+        current_missing = ("start" not in word_segments[i]) or ("end" not in word_segments[i])
+        if current_missing:
+            start_run = i
+            # move i until we find a word that has both "start" and "end"
+            while i < n_words and (
+                ("start" not in word_segments[i]) or ("end" not in word_segments[i])
+            ):
+                i += 1
+            end_run = i - 1
+            runs.append((start_run, end_run))
+        else:
+            i += 1
+
+    # 2. For each run, find the boundary times and distribute
+    for (start_run, end_run) in runs:
+        # The run might be only 1 word or multiple consecutive words.
+        run_length = end_run - start_run + 1
+
+        # 2a. Find the boundary on the left
+        #     If there's a previous word that has a valid 'end', use that.
+        #     Otherwise, fallback to 0.0
+        if start_run > 0 and "end" in word_segments[start_run - 1]:
+            left_time = word_segments[start_run - 1]["end"]
+        else:
+            left_time = 0.0
+
+        # 2b. Find the boundary on the right
+        #     If there's a next word that has a valid 'start', use that.
+        #     Otherwise, fallback to total_audio_duration
+        if end_run < n_words - 1 and "start" in word_segments[end_run + 1]:
+            right_time = word_segments[end_run + 1]["start"]
+        else:
+            right_time = total_audio_duration
+
+        # 2c. Edge case: If left_time is already >= right_time, we can't do a normal distribution
+        if left_time >= right_time:
+            # fallback: just set them all to left_time or do some minimal logic
+            increment = 0.1  # or however you want to handle this pathological case
+            for k in range(run_length):
+                idx = start_run + k
+                # at least assign something so they don't remain unset
+                start_t = left_time + (k * increment)
+                word_segments[idx]["start"] = start_t
+                word_segments[idx]["end"] = start_t + increment
+            continue
+
+        # 3. Evenly distribute times across the run
+        interval = right_time - left_time
+        segment_length = interval / run_length
+
+        for k in range(run_length):
+            idx = start_run + k
+            # The start = left boundary + k*segment_length
+            # The end = left boundary + (k+1)*segment_length
+            word_segments[idx]["start"] = left_time + k * segment_length
+            word_segments[idx]["end"] = left_time + (k + 1) * segment_length
 
 def segment_with_threshold(audio, alignment, output_path, padding, symmetrical=True):
     if not os.path.exists(output_path):
@@ -669,62 +752,86 @@ def get_audio_files(folder_path):
                 audio_files.append(os.path.join(root, file))
     return audio_files
 
+def load_config(config_path: str) -> dict:
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
 # Press the green button in the gutter to run the script.
 if __name__ == "__main__":
-    debug = False
+    # Optionally: parse CLI just for the config path (and maybe for overrides)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/config.yaml", help="Path to config file")
+    args = parser.parse_args()
+    cfg = load_config(args.config)
+    if not cfg:
+        logger.error("Config file not found.")
+        exit(1)
+
+
     # Load models
-    if detect_gpu():
-        logger.info("Using GPU")
-        device_name = "cuda"
-        device = torch.device(device_name)
+    logger.debug(" * Setting device")
+    if cfg.get("general", {}).get("device") == "auto":
+        if detect_gpu():
+            logger.info("Using GPU")
+            device_name = "cuda"
+            device = torch.device(device_name)
+        else:
+            logger.info("Using CPU")
+            device_name = "cpu"
+            device = torch.device(device_name)
     else:
-        logger.info("Using CPU")
-        device_name = "cpu"
+        device_name = cfg.get("general", {}).get("device")
         device = torch.device(device_name)
+
 
     logger.debug(" * Loading ASRX Model")
     from models import whisperx_asr
 
-    separate_predictor1 = separate_fast.Predictor(
-        args={
-            "model_path": "models/UVR-MDX-NET-Inst_HQ_3.onnx",
-            "denoise": True,
-            "margin": 44100,
-            "chunks": 15,
-            "n_fft": 6144,
-            "dim_t": 8,
-            "dim_f": 3072,
-        },
-        device=device_name,
-    )
+    whisperx_asr_params = cfg.get("whisperx_asr", {})
+    asr_options = {
+        "hotwords": False,
+        "multilingual": True,
+        "suppress_numerals": True,
+        "initial_prompt": "Um, Uh, Ah. Like, you know. I mean, right. Actually. Basically, and right? okay. Alright. Emm. So. Oh. 生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!微斯人,吾谁与归?ええと、あの、ま、そう、ええ。äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, eh bien, du coup. genre, comme, style. 응,어,그,음."
+    }
+    # merge in whisperx_asr_params.get("asr_options",{}), into asr_options overwriting over the same keys
+    if whisperx_asr_params.get("asr_options", {}):
+        asr_options.update(whisperx_asr_params.get("asr_options", {}))
     whisperx_asr_model = whisperx_asr.WhisperXModel(
-        "large-v3-turbo",
-        language="en",
+        model=whisperx_asr_params.get("model", "large-v3"),
+        language=whisperx_asr_params.get("language", "en"),
         device=device_name,
-        compute_type="float16",
-        suppress_numerals=True,
+        compute_type=whisperx_asr_params.get("compute_type", "float16"),
+        suppress_numerals=whisperx_asr_params.get("suppress_numerals", True),
         threads=1,
-        asr_options={
-            "hotwords": None,
-            "multilingual": True,
-            "suppress_numerals": True,
-            "initial_prompt": "Um, Uh, Ah. Like, you know. I mean, right. Actually. Basically, and right? okay. Alright. Emm. So. Oh. 生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!微斯人,吾谁与归?ええと、あの、ま、そう、ええ。äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, eh bien, du coup. genre, comme, style. 응,어,그,음.",
-        },
+        asr_options=asr_options
     )
     logger.debug("ASRX Model loaded")
 
+    logger.debug(" * Loading Separate Model")
+    separate_fast_params = cfg.get("separate_fast", {})
+    if not separate_fast_params:
+        logger.error("Separate model parameters not found in config.")
+        exit(1)
+    separate_predictor1 = separate_fast.Predictor(
+        args=separate_fast_params,
+        device=device_name,
+    )
+    logger.debug(" * Separate Model loaded")
+
     logger.debug(" * Loading Respiro Model")
     # breath detection
+
+    respiro_params = cfg.get("respiro", {})
     breath_model = BreathDetector(
-        model_path="models/respiro-en.pt",
-        threshold=0.064,
-        min_length=10,
+        model_path=respiro_params.get("model_path", "models/respiro-en.pt"),
+        threshold=respiro_params.get("threshold", 0.064),
+        min_length=respiro_params.get("min_length", 10),
     )
+
     logger.debug("Respiro Model loaded")
 
-    input_folder_path = "data/audio"  # Specify the input folder path
+    input_folder_path = cfg.get("general", {}).get("input_folder", "data/audio")
     audio_paths = get_audio_files(input_folder_path)  # Get all audio files
-    audio_paths = audio_paths[-2:]  # Get the last 2 audio files
     for path in audio_paths:
-        process(path)
+        process(cfg, path)
