@@ -378,7 +378,7 @@ def load_model_dict():
             model_path_name,
         )
         assert os.path.exists(model_path_name)
-    state_dict = torch.load(model_path_name, map_location="cpu",weights_only=True)
+    state_dict = torch.load(model_path_name, map_location="cpu", weights_only=True)
 
     model = wav2vec2_model(
         extractor_mode="layer_norm",
@@ -1204,4 +1204,4 @@ def get_valleys(audio: dict) -> (dict, dict):
     sample_rate = audio["sample_rate"]
     # test = get_valley_tree(waveform, sample_rate)
     valleys = get_valley_tree(waveform, sample_rate)
-    return get_valley_dict(valleys), filter_sequential(valleys)
+    return get_valley_dict(valleys, num_items=50), filter_sequential(valleys)

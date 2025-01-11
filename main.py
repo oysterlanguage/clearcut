@@ -5,6 +5,7 @@ import onnxruntime as ort
 from diskcache import Cache
 import librosa
 import time
+from models import separate_fast
 from models.respiro import BreathDetector
 from models.uroman_align import align, quick_align, get_valleys, find_threshold_crossing
 from intervaltree import IntervalTree
@@ -142,13 +143,158 @@ def create_textgrid_from_data(dictionary, output_path):
 
 
 @time_logger
+def source_separation(predictor, audio) -> (dict, dict):
+    """
+    Separate the audio into vocals and non-vocals using the given predictor.
+
+    Args:
+        predictor: The separation model predictor.
+        audio (str or dict): The audio file path or a dictionary containing audio waveform and sample rate.
+
+    Returns:
+        dict: A dictionary containing the separated vocals and updated audio waveform.
+    """
+
+    mix, rate = None, None
+
+    if isinstance(audio, str):
+        mix, rate = librosa.load(audio, mono=False, sr=44100)
+    else:
+        # resample to 44100
+        rate = audio["sample_rate"]
+        mix = librosa.resample(audio["waveform"], orig_sr=rate, target_sr=44100)
+
+    vocals, no_vocals = predictor.predict(mix)
+
+    # convert vocals back to previous sample rate
+    logger.debug(f"vocals shape before resample: {vocals.shape}")
+    vocals = librosa.resample(vocals.T, orig_sr=44100, target_sr=rate).T
+    logger.debug(f"vocals shape after resample: {vocals.shape}")
+    audio["waveform"] = vocals[:, 0]  # vocals is stereo, only use one channel
+
+    logger.debug(f"no_vocals shape before resample: {no_vocals.shape}")
+    no_vocals = librosa.resample(no_vocals.T, orig_sr=44100, target_sr=rate).T
+    logger.debug(f"no_vocals shape after resample: {no_vocals.shape}")
+    no_vocals_audio = {"waveform": no_vocals[:, 0], "sample_rate": rate}
+
+    return audio, no_vocals_audio
+
+
+def dbfs(waveform):
+    """Compute the approximate dBFS of a waveform."""
+    # RMS of the waveform
+    rms = np.sqrt(np.mean(waveform**2)) if np.mean(waveform**2) > 0 else 1e-10
+    return 20 * np.log10(rms + 1e-10)
+
+
+@time_logger
+def standardization(audio, sample_rate=0, start_s=0, duration_s=None):
+    """
+    Preprocess the audio file using librosa instead of pydub.
+    Operations include setting sample rate, converting to mono, trimming,
+    normalizing volume, and scaling amplitude.
+
+    Args:
+        audio (str or np.ndarray):
+            - If str: Path to the audio file to load.
+            - If np.ndarray: A raw waveform array.
+        sample_rate (int): The target sample rate for the audio.
+        start_s (float): The start time in seconds to trim the audio.
+        duration_s (float): The duration in seconds to trim the audio.
+
+    Returns:
+        dict: A dictionary containing:
+              {
+                  "waveform": np.ndarray, the preprocessed audio waveform, shape (num_samples,)
+                              dtype is np.float32
+                  "name": str, the audio file name
+                  "sample_rate": int, the audio sample rate
+              }
+
+    Raises:
+        ValueError: If the audio parameter is neither a str nor a NumPy ndarray.
+    """
+    global audio_count
+    name = "audio"
+
+    # Load audio
+    # If audio is a file path
+    if isinstance(audio, str):
+        name = os.path.basename(audio)
+        name = audio
+        # librosa.load automatically converts to float32 and can handle trimming
+        # offset=start_s sets the start position, duration=duration_s sets the length
+        waveform, sr = librosa.load(
+            audio, mono=True, offset=start_s, duration=duration_s
+        )
+        sample_rate = sr
+    # If audio is a NumPy array (raw waveform)
+    elif isinstance(audio, np.ndarray):
+        # Here we assume `audio` is a waveform at the correct rate, or we might need to resample if needed.
+        # If you need to ensure a specific sample rate, you can resample here:
+        # waveform = librosa.resample(audio, original_sr, sample_rate)
+        # But since we don't have original_sr here, we assume it's correct.
+        waveform = audio.astype(np.float32)
+        sr = sample_rate
+        name = f"audio_{audio_count}"
+        audio_count += 1
+    else:
+        raise ValueError(
+            "Invalid audio type. Must be either a file path (str) or a NumPy array."
+        )
+
+    logger.debug("Entering the preprocessing of audio (using librosa)")
+
+    # waveform is now a float32 array in [-1.0, 1.0], single channel, at the specified sample_rate.
+
+    # Now, we want to replicate the volume normalization logic:
+    # Original code aimed for a target of -20 dBFS and then clipped the gain between -3 dB and +3 dB.
+
+    # Compute current dBFS
+    current_dBFS = dbfs(waveform)
+    target_dBFS = -20.0
+    gain = target_dBFS - current_dBFS
+    logger.info(f"Calculating the gain needed for the audio: {gain} dB")
+
+    # Clamp the gain between -3 and 3 dB
+    gain_clamped = np.clip(gain, -3, 3)
+
+    # Apply gain (in linear scale)
+    linear_gain = 10.0 ** (gain_clamped / 20.0)
+    waveform = waveform * linear_gain
+
+    # Final normalization (to ensure the max amplitude is 1.0)
+    max_amplitude = np.max(np.abs(waveform))
+    if max_amplitude > 0:
+        waveform /= max_amplitude
+
+    # Ensure float32 type
+    waveform = waveform.astype(np.float32)
+
+    logger.debug(f"waveform shape: {waveform.shape}")
+    logger.debug("waveform in np ndarray, dtype=" + str(waveform.dtype))
+
+    return {
+        "waveform": waveform,
+        "path": name,
+        "sample_rate": sample_rate,
+    }
+
+
+@time_logger
 def process(audio_path):
     logger.info("Step 0: Load audio")
     y, sr = librosa.load(audio_path, sr=None)
     audio = {"waveform": y, "sample_rate": sr, "path": audio_path}
+    audio = standardization(audio_path)
+    separate_predictor1.load_model()
+    audio, no_vocal = source_separation(separate_predictor1, audio)
+    # write no_vocal to file
+    # sf.write(audio_path.replace("audio", "no_vocal"), no_vocal["waveform"], no_vocal["sample_rate"])
+    separate_predictor1.unload_model()
 
     if os.path.exists(f"{audio_path}.txt"):
-        logger.info("Step 1: Using provided test instead of ASR")
+        logger.info("Step 1: Using provided text instead of ASR")
         if debug:
             with open(f"{audio_path}.txt", "r") as f:
                 segments = f.readlines()
@@ -228,12 +374,31 @@ def process(audio_path):
     # output_path += "_segments"
     # segment_with_minima(audio, alignment, output_path, padding)
 
-    padding = 0.15
+    start_padding = 0.15
     output_path = audio.get("path")
     output_path = output_path.replace("data/audio", "data/processed")
-    output_path += "_segments_test"
-    segment_with_threshold(audio, alignment, output_path, padding)
+    output_path += "_segments"
+    output_path = "data/segments"
+    segment_with_threshold(
+        audio, alignment, output_path, start_padding, symmetrical=False
+    )
 
+    for segment in alignment:
+        # calculate peak and average db level of same time in the no_vocal audio
+        start = segment[1].get("start")
+        end = segment[1].get("end")
+        start_sample = int(start * no_vocal["sample_rate"])
+        end_sample = int(end * no_vocal["sample_rate"])
+        clip = no_vocal["waveform"][start_sample:end_sample]
+        db = dbfs(clip)
+        average_db = np.mean(clip)
+        max_db = np.max(clip)
+        print(
+            f"Segment {segment[0]['text']} has average db level of {average_db} and max db level of {max_db}, and dbfs of {db}"
+        )
+        pass
+
+    # todo fix issue with multiple sequential words wihh no start or end time
     logger.info("step 5: Fixing missing word start and end times")
     for index in range(len(asrx_result.get("word_segments")) - 1):
         if "end" not in asrx_result.get("word_segments")[index]:
@@ -252,8 +417,12 @@ def process(audio_path):
                 )[index - 1]["end"]
 
     breath_peaks = [breath.data[1] for breath in breaths if breath.data]
-    mean = statistics.mean(breath_peaks)
-    std_dev = statistics.stdev(breath_peaks)
+    if len(breath_peaks) > 1:
+        mean = statistics.mean(breath_peaks)
+        std_dev = statistics.stdev(breath_peaks)
+    else:
+        mean = 0
+        std_dev = 1
 
     possible_breath_misses = [
         breath.data
@@ -267,8 +436,12 @@ def process(audio_path):
     edge_db = [segment[1]["lowest"]["start"]["db"] for segment in alignment] + [
         segment[1]["lowest"]["end"]["db"] for segment in alignment
     ]
-    mean = statistics.mean(edge_db)
-    std_dev = statistics.stdev(edge_db)
+    if len(edge_db) > 1:
+        mean = statistics.mean(edge_db)
+        std_dev = statistics.stdev(edge_db)
+    else:
+        mean = 0
+        std_dev = 1
 
     # we may want to join on loud splits
     possible_edge_misses = [
@@ -280,6 +453,60 @@ def process(audio_path):
     print(
         f"These segments end unusually loud and could cause clipping: {possible_edge_misses}"
     )
+    # build interval tree from words
+    logger.info("Step 6: Create word intervals")
+    word_intervals = IntervalTree()
+    for index in range(len(asrx_result.get("word_segments"))):
+        if "start" not in asrx_result.get("word_segments")[index]:
+            if index == 0:
+                asrx_result.get("word_segments")[index]["start"] = 0
+            else:
+                asrx_result.get("word_segments")[index]["start"] = asrx_result.get(
+                    "word_segments"
+                )[index - 1]["end"]
+        if "end" not in asrx_result.get("word_segments")[index]:
+            if index == len(asrx_result.get("word_segments")) - 1:
+                asrx_result.get("word_segments")[index]["end"] = len(y) / sr
+            else:
+                asrx_result.get("word_segments")[index]["end"] = asrx_result.get(
+                    "word_segments"
+                )[index + 1]["start"]
+        if (
+            asrx_result.get("word_segments")[index]["start"]
+            >= asrx_result.get("word_segments")[index]["end"]
+        ):
+            logger.error(
+                f"Word {asrx_result.get('word_segments')[index]} has start time after end time"
+            )
+            continue
+        word_intervals.addi(
+            asrx_result.get("word_segments")[index]["start"],
+            asrx_result.get("word_segments")[index]["end"],
+            data=asrx_result.get("word_segments")[index].get("word"),
+        )
+    mixed = breaths | word_intervals
+    audio_file_name = os.path.basename(audio_path)
+
+    # save a training file that contains the path to the audio then pipe then the text including <breath> where breaths happen example fileaudio/segment_8.wav|They layer the memory like strata.
+    with open(os.path.join("data/train", f"{audio_file_name}.train.txt"), "w") as f:
+        for segment in alignment:
+            start = segment[1].get("padding_start")
+            end = segment[1].get("padding_end")
+            # use mixed to get the words that fall within the segment
+            words = sorted(mixed[start:end])
+            text = []
+            for word in words:
+                if type(word.data) == str:
+                    text.append(word.data)
+                else:
+                    text.append("<breath>")
+            # remove breath tag if its the first or last word in text
+            if text[0] == "<breath>":
+                text.pop(0)
+            if text[-1] == "<breath>":
+                text.pop()
+            line = f"{segment[1].get('filename')}|{' '.join(text)}\n"
+            f.write(line)
 
     logger.info("Step 5: Create TextGrid")
     create_textgrid_from_data(
@@ -313,16 +540,29 @@ def process(audio_path):
     )
 
 
-def segment_with_threshold(audio, alignment, output_path, padding):
+def segment_with_threshold(audio, alignment, output_path, padding, symmetrical=True):
     if not os.path.exists(output_path):
         os.mkdir(output_path)
+    filename = os.path.basename(audio.get("path"))
+    length = len(alignment)
     for i in range(len(alignment)):
         try:
             start = alignment[i][1].get("padding_start")
             end = alignment[i][1].get("padding_end")
 
             left_padding = np.zeros(int(padding * audio.get("sample_rate")))
-            right_padding = np.zeros(int(padding * audio.get("sample_rate")))
+            if symmetrical == True or i == length - 1:
+                right_padding = np.zeros(int(padding * audio.get("sample_rate")))
+            else:
+                right_padding = np.zeros(
+                    int(
+                        max(
+                            padding,
+                            (alignment[i + 1][1].get("padding_start") - end - padding),
+                        )
+                        * audio.get("sample_rate")
+                    )
+                )
 
             # Calculate sample indices
             start_sample = int(start * audio.get("sample_rate"))
@@ -333,10 +573,12 @@ def segment_with_threshold(audio, alignment, output_path, padding):
 
             # Add padding to the segment
             y_padded = np.concatenate((left_padding, y_segment, right_padding))
-
+            alignment[i][1]["filename"] = os.path.join(
+                output_path, f"{filename}.segment{i}.wav"
+            )
             # Save the padded audio segment as a WAV file
             sf.write(
-                os.path.join(output_path, f"segment{i}.wav"),
+                os.path.join(output_path, f"{filename}.segment.{i}.wav"),
                 y_padded,
                 audio.get("sample_rate"),
             )
@@ -444,6 +686,18 @@ if __name__ == "__main__":
     logger.debug(" * Loading ASRX Model")
     from models import whisperx_asr
 
+    separate_predictor1 = separate_fast.Predictor(
+        args={
+            "model_path": "models/UVR-MDX-NET-Inst_HQ_3.onnx",
+            "denoise": True,
+            "margin": 44100,
+            "chunks": 15,
+            "n_fft": 6144,
+            "dim_t": 8,
+            "dim_f": 3072,
+        },
+        device=device_name,
+    )
     whisperx_asr_model = whisperx_asr.WhisperXModel(
         "large-v3-turbo",
         language="en",
@@ -452,7 +706,7 @@ if __name__ == "__main__":
         suppress_numerals=True,
         threads=1,
         asr_options={
-            "hotwords":None,
+            "hotwords": None,
             "multilingual": True,
             "suppress_numerals": True,
             "initial_prompt": "Um, Uh, Ah. Like, you know. I mean, right. Actually. Basically, and right? okay. Alright. Emm. So. Oh. 生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!微斯人,吾谁与归?ええと、あの、ま、そう、ええ。äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, eh bien, du coup. genre, comme, style. 응,어,그,음.",
@@ -469,10 +723,8 @@ if __name__ == "__main__":
     )
     logger.debug("Respiro Model loaded")
 
-    input_folder_path = "data/audio"
+    input_folder_path = "data/audio"  # Specify the input folder path
     audio_paths = get_audio_files(input_folder_path)  # Get all audio files
+    audio_paths = audio_paths[-2:]  # Get the last 2 audio files
     for path in audio_paths:
         process(path)
-
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/

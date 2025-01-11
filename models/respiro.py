@@ -169,7 +169,7 @@ class BreathDetector:
 
     def load_model(self):
         model = DetectionNet().to(self.device)
-        checkpoint = torch.load(self.model_path,weights_only=True)
+        checkpoint = torch.load(self.model_path, weights_only=True)
         model.load_state_dict(checkpoint["model"])
         model.eval()
         self.model = model
