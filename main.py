@@ -657,7 +657,7 @@ def segment_with_threshold(audio, alignment, output_path, padding, symmetrical=T
             # Add padding to the segment
             y_padded = np.concatenate((left_padding, y_segment, right_padding))
             alignment[i][1]["filename"] = os.path.join(
-                output_path, f"{filename}.segment{i}.wav"
+                output_path, f"{filename}.segment.{i}.wav"
             )
             # Save the padded audio segment as a WAV file
             sf.write(
