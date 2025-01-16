@@ -317,7 +317,20 @@ def process(config, audio_path):
                 asrx_result = byob_transcribe(audio, segments)
                 cache.set(f"byob_transcribe:{audio_path}", asrx_result)
         else:
-            with open(f"{audio_path}.txt", "r") as f:
+            with open(f"{audio_path}.txt", "r", encoding="utf-8") as f:
+                segments = f.readlines()
+            asrx_result = byob_transcribe(audio, segments)
+    elif os.path.exists(f"{".".join(audio_path.split(".")[:-1])}.txt"):
+        logger.info(f"Step 1: Using provided text instead of ASR {".".join(audio_path.split(".")[:-1])}.txt")
+        if debug:
+            with open(f"{".".join(audio_path.split(".")[:-1])}.txt", "r") as f:
+                segments = f.readlines()
+            asrx_result = cache.get(f"byob_transcribe:{".".join(audio_path.split(".")[:-1])}", None)
+            if asrx_result is None:
+                asrx_result = byob_transcribe(audio, segments)
+                cache.set(f"byob_transcribe:{".".join(audio_path.split(".")[:-1])}", asrx_result)
+        else:
+            with open(f"{".".join(audio_path.split(".")[:-1])}.txt", "r") as f:
                 segments = f.readlines()
             asrx_result = byob_transcribe(audio, segments)
     else:
@@ -494,7 +507,7 @@ def process(config, audio_path):
     train_path = config.get("general", {}).get("train_path", "data/train")
     if not os.path.exists(train_path):
         os.makedirs(train_path)
-    with open(os.path.join(train_path, f"{audio_file_name}.train.txt"), "w") as f:
+    with open(os.path.join(train_path, f"{audio_file_name}.train.txt"), "w", encoding="utf-8") as f:
         for segment in alignment:
             start = segment[1].get("padding_start")
             end = segment[1].get("padding_end")
