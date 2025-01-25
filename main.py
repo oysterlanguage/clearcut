@@ -15,7 +15,11 @@ import numpy as np
 import soundfile as sf
 import yaml
 import argparse
-
+from dataclasses import replace
+import random
+import re
+from difflib import SequenceMatcher
+from number_normalizer import replace_numbers_in_text, extract_and_update_sequence
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
@@ -126,18 +130,19 @@ def create_textgrid(dictionary, output_path):
     tg = TextGrid()
 
     for key, values in dictionary.items():
-        # Create an IntervalTier for words
-        words_tier = IntervalTier(name=key)
-        for entry in values:
-            start = float(entry["start"])
-            end = float(entry["end"])
-            word = entry["word"]
-            try:
-                words_tier.add(start, end, word)
-            except Exception as e:
-                logger.error(f"Error adding entry to TextGrid tier: {entry}")
-                logger.error(e)
-        tg.append(words_tier)
+        if values:
+            # Create an IntervalTier for words
+            words_tier = IntervalTier(name=key)
+            for entry in values:
+                start = float(entry["start"])
+                end = float(entry["end"])
+                word = entry["word"]
+                try:
+                    words_tier.add(start, end, word)
+                except Exception as e:
+                    logger.error(f"Error adding entry to TextGrid tier: {entry}")
+                    logger.error(e)
+            tg.append(words_tier)
 
     # Write the TextGrid to a file
     tg.write(output_path)
@@ -283,6 +288,57 @@ def standardization(audio, sample_rate=None, start_s=0, duration_s=None):
         "audio_length": len(waveform) / sample_rate,
     }
 
+def merge_texts_preserving_newlines(text1, text2):
+    tokens1 = re.findall(r'\n|\S+', text1)
+    tokens2 = re.findall(r'\n|\S+', text2)
+
+    sm = SequenceMatcher(None, tokens1, tokens2)
+    output_tokens = []
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag in ['equal', 'delete']:
+            k = j1
+            for pos in range(i1, i2):
+                if tokens1[pos] == '\n':
+                    output_tokens.append('\n')
+                else:
+                    if k < j2:
+                        output_tokens.append(tokens2[k])
+                        k += 1
+                    else:
+                        output_tokens.append(tokens1[pos])
+
+        elif tag == 'replace':
+            k = j1
+            for pos in range(i1, i2):
+                if tokens1[pos] != '\n':
+                    if k < j2:
+                        output_tokens.append(tokens2[k])
+                        k += 1
+                    else:
+                        output_tokens.append(tokens1[pos])
+            while k < j2:
+                if tokens2[k] != '\n':
+                    output_tokens.append(tokens2[k])
+                    k += 1
+                else:
+                    break
+            index = 1
+            while tokens1[i2-index] == '\n':
+                output_tokens.append('\n')
+                index += 1
+
+    result = []
+    for token in output_tokens:
+        if token == '\n':
+            result.append(token)
+        else:
+            if result and not result[-1].endswith('\n'):
+                result.append(' ' + token)
+            else:
+                result.append(token)
+
+    return ''.join(result)
 
 @time_logger
 def process(config, audio_path):
@@ -306,34 +362,29 @@ def process(config, audio_path):
         # write no_vocal to file
         # sf.write(audio_path.replace("audio", "no_vocal"), no_vocal["waveform"], no_vocal["sample_rate"])
         separate_predictor1.unload_model()
-
-    if os.path.exists(f"{audio_path}.txt"):
-        logger.info(f"Step 1: Using provided text instead of ASR {audio_path}.txt")
-        if debug:
-            with open(f"{audio_path}.txt", "r") as f:
+    original_text = ""
+    asrx_result = None
+    asr_files = [f"{audio_path}.fixed.txt", f"{".".join(audio_path.split(".")[:-1])}.fixed.txt", f"{audio_path}.txt", f"{".".join(audio_path.split(".")[:-1])}.txt"]
+    for asr_file in asr_files:
+        if os.path.exists(asr_file):
+            logger.info(f"Step 1: Using provided text instead of ASR {asr_file}")
+            with open(asr_file, "r", encoding="utf-8") as f:
                 segments = f.readlines()
-            asrx_result = cache.get(f"byob_transcribe:{audio_path}", None)
+            original_text = "".join(segments)
+            if config.get("normalize_byo_transcript",{}).get("aggressive_segment", False):
+                original_text = normalize_text(original_text)
+                original_text = aggressive_split(original_text)
+                segments = original_text.split("\n")
+            if "fixed" in asr_file:
+                original_text = ""
+            if debug:
+                asrx_result = cache.get(f"byob_transcribe:{asr_file}", None)
             if asrx_result is None:
                 asrx_result = byob_transcribe(audio, segments)
+            if debug:
                 cache.set(f"byob_transcribe:{audio_path}", asrx_result)
-        else:
-            with open(f"{audio_path}.txt", "r", encoding="utf-8") as f:
-                segments = f.readlines()
-            asrx_result = byob_transcribe(audio, segments)
-    elif os.path.exists(f"{".".join(audio_path.split(".")[:-1])}.txt"):
-        logger.info(f"Step 1: Using provided text instead of ASR {".".join(audio_path.split(".")[:-1])}.txt")
-        if debug:
-            with open(f"{".".join(audio_path.split(".")[:-1])}.txt", "r") as f:
-                segments = f.readlines()
-            asrx_result = cache.get(f"byob_transcribe:{".".join(audio_path.split(".")[:-1])}", None)
-            if asrx_result is None:
-                asrx_result = byob_transcribe(audio, segments)
-                cache.set(f"byob_transcribe:{".".join(audio_path.split(".")[:-1])}", asrx_result)
-        else:
-            with open(f"{".".join(audio_path.split(".")[:-1])}.txt", "r") as f:
-                segments = f.readlines()
-            asrx_result = byob_transcribe(audio, segments)
-    else:
+            break
+    if asrx_result is None:
         logger.info("Step 1: whisperx ASR")
         if debug:
             asrx_result = cache.get(f"asrx_result:{audio_path}", None)
@@ -342,7 +393,21 @@ def process(config, audio_path):
                 cache.set(f"asrx_result:{audio_path}", asrx_result)
         else:
             asrx_result = asr(audio)
-    # logger.info(f"ASR Result: {asrx_result}")
+        # logger.info(f"ASR Result: {asrx_result}")
+
+    if config.get("normalize_byo_transcript", {}).get("enabled", False) and original_text != "":
+        logger.info("step 5: Fixing missing word start and end times")
+        fix_missing_word_times(asrx_result, audio)
+
+        text = " ".join([word.get("word") for word in asrx_result.get("word_segments")])
+        # text = normalize_text(text)
+
+        fixed_text = merge_texts_preserving_newlines(original_text, text)
+
+        with open(f"{audio_path}.fixed.txt", "w", encoding="utf-8") as f:
+            logger.debug(f"Found differences between original and fixed text saved to {audio_path}.fixed.txt")
+            f.write(fixed_text)
+        return False
 
     segments = asrx_result["segments"]
     # joined_segments = []
@@ -396,6 +461,7 @@ def process(config, audio_path):
         else:
             alignment[i][1]["padding_end"] = end_crossing[0]
 
+
     # padding = .15
     # output_path = audio.get("path")
     # output_path = output_path.replace("data/audio", "data/processed")
@@ -404,15 +470,82 @@ def process(config, audio_path):
 
     start_padding = config.get("segment_with_threshold", {}).get("padding", 0.15)
     symmetrical = config.get("segment_with_threshold", {}).get("symmetrical", False)
+    segments_count = len(alignment)
+    for i in range(len(alignment)):
+        try:
+            start = alignment[i][1].get("padding_start")
+            end = alignment[i][1].get("padding_end")
+
+            left_padding = start_padding
+            if symmetrical == True or i == segments_count - 1:
+                right_padding = start_padding
+            else:
+                right_padding = max(start_padding, (alignment[i + 1][1].get("padding_start") - end - start_padding))
+            alignment[i][1]["left_padding"] = left_padding
+            alignment[i][1]["right_padding"] = right_padding
+        except Exception as e:
+            logger.error(f"Error processing segment {alignment[i]}")
+            logger.error(e)
+            alignment[i][1]["left_padding"] = start_padding
+            alignment[i][1]["right_padding"] = start_padding
 
     output_path = config.get("general", {}).get("output_path", "data/segments")
 
     if not os.path.exists(output_path):
         os.makedirs(output_path)
 
-    segment_with_threshold(
-        audio, alignment, output_path, start_padding, symmetrical=symmetrical
-    )
+    # build interval tree from words
+    logger.info("Step 6: Create word intervals")
+    word_intervals = IntervalTree()
+    for index in range(len(asrx_result.get("word_segments"))):
+        if "start" not in asrx_result.get("word_segments")[index]:
+            if index == 0:
+                asrx_result.get("word_segments")[index]["start"] = 0
+            else:
+                asrx_result.get("word_segments")[index]["start"] = asrx_result.get(
+                    "word_segments"
+                )[index - 1]["end"]
+        if "end" not in asrx_result.get("word_segments")[index]:
+            if index == len(asrx_result.get("word_segments")) - 1:
+                asrx_result.get("word_segments")[index]["end"] = audio.get("audio_length")
+            else:
+                asrx_result.get("word_segments")[index]["end"] = asrx_result.get(
+                    "word_segments"
+                )[index + 1]["start"]
+        if (
+            asrx_result.get("word_segments")[index]["start"]
+            >= asrx_result.get("word_segments")[index]["end"]
+        ):
+            logger.error(
+                f"Word {asrx_result.get('word_segments')[index]} has start time after end time"
+            )
+            continue
+        word_intervals.addi(
+            asrx_result.get("word_segments")[index]["start"],
+            asrx_result.get("word_segments")[index]["end"],
+            data=asrx_result.get("word_segments")[index].get("word"),
+        )
+    mixed = breaths | word_intervals
+
+    train_path = config.get("general", {}).get("train_path", "data/train")
+    if not os.path.exists(train_path):
+        os.makedirs(train_path)
+
+    audio_file_name = os.path.basename(audio_path)
+    train_file = os.path.join(train_path, f"{audio_file_name}.train.txt")
+
+    if config.get("combine_segments", {}).get("enabled", False):
+        max_len = config.get("combine_segments", {}).get("max_len", 30)
+        max_segments = config.get("combine_segments", {}).get("max_segments", 2)
+        segment_with_threshold_expand(audio, alignment, output_path, mixed, train_file, max_len, max_segments)
+    else:
+        segment_with_threshold(
+            audio, alignment, output_path, mixed
+        )
+        with open(train_file, "w", encoding="utf-8") as f:
+            for segment in alignment:
+                line = segment[1].get("line")
+                f.write(line)
 
     if config.get("separate_fast", {}).get("enabled", False):
         for segment in alignment:
@@ -430,8 +563,6 @@ def process(config, audio_path):
             )
             pass
 
-    logger.info("step 5: Fixing missing word start and end times")
-    fix_missing_word_times(asrx_result, audio.get("audio_length"))
 
     breath_peaks = [breath.data[1] for breath in breaths if breath.data]
     if len(breath_peaks) > 1:
@@ -470,62 +601,7 @@ def process(config, audio_path):
     print(
         f"These segments end unusually loud and could cause clipping: {possible_edge_misses}"
     )
-    # build interval tree from words
-    logger.info("Step 6: Create word intervals")
-    word_intervals = IntervalTree()
-    for index in range(len(asrx_result.get("word_segments"))):
-        if "start" not in asrx_result.get("word_segments")[index]:
-            if index == 0:
-                asrx_result.get("word_segments")[index]["start"] = 0
-            else:
-                asrx_result.get("word_segments")[index]["start"] = asrx_result.get(
-                    "word_segments"
-                )[index - 1]["end"]
-        if "end" not in asrx_result.get("word_segments")[index]:
-            if index == len(asrx_result.get("word_segments")) - 1:
-                asrx_result.get("word_segments")[index]["end"] = len(y) / sr
-            else:
-                asrx_result.get("word_segments")[index]["end"] = asrx_result.get(
-                    "word_segments"
-                )[index + 1]["start"]
-        if (
-            asrx_result.get("word_segments")[index]["start"]
-            >= asrx_result.get("word_segments")[index]["end"]
-        ):
-            logger.error(
-                f"Word {asrx_result.get('word_segments')[index]} has start time after end time"
-            )
-            continue
-        word_intervals.addi(
-            asrx_result.get("word_segments")[index]["start"],
-            asrx_result.get("word_segments")[index]["end"],
-            data=asrx_result.get("word_segments")[index].get("word"),
-        )
-    mixed = breaths | word_intervals
-    audio_file_name = os.path.basename(audio_path)
 
-    train_path = config.get("general", {}).get("train_path", "data/train")
-    if not os.path.exists(train_path):
-        os.makedirs(train_path)
-    with open(os.path.join(train_path, f"{audio_file_name}.train.txt"), "w", encoding="utf-8") as f:
-        for segment in alignment:
-            start = segment[1].get("padding_start")
-            end = segment[1].get("padding_end")
-            # use mixed to get the words that fall within the segment
-            words = sorted(mixed[start:end])
-            text = []
-            for word in words:
-                if type(word.data) == str:
-                    text.append(word.data)
-                else:
-                    text.append("<breath>")
-            # remove breath tag if its the first or last word in text
-            if text[0] == "<breath>":
-                text.pop(0)
-            if text[-1] == "<breath>":
-                text.pop()
-            line = f"{segment[1].get('filename')}|{' '.join(text)}\n"
-            f.write(line)
 
     if config.get("create_textgrid", {}).get("enabled", False):
         logger.info("Step 5: Create TextGrid")
@@ -558,8 +634,61 @@ def process(config, audio_path):
             },
             f"{audio_path}.TextGrid",
         )
+    return True
 
-def fix_missing_word_times(asrx_result, total_audio_duration):
+
+def get_text_with_breath(mixed, start, end):
+    words = sorted(mixed[start:end])
+    text = []
+    for word in words:
+        if type(word.data) == str:
+            text.append(word.data)
+        else:
+            text.append("<breath>")
+    # remove breath tag if its the first or last word in text
+    if len(text) and text[0] == "<breath>":
+        text.pop(0)
+    if len(text) and text[-1] == "<breath>":
+        text.pop()
+    return text
+
+
+def normalize_text(text):
+    ABBREVIATIONS = {
+        "Mr. ": "Mister ",
+        "Mrs. ": "Misses ",
+        "No. ": "Number ",
+        "Dr. ": "Doctor ",
+        "Ms. ": "Miss ",
+        "Ave. ": "Avenue ",
+        "Blvd. ": "Boulevard ",
+        "Ln. ": "Lane ",
+        "Rd. ": "Road ",
+        "ft. ": "feet ",
+        "hr. ": "hour ",
+        "min. ": "minute ",
+        "sq. ": "square ",
+        "St. ": "street ",
+        "Asst. ": "assistant ",
+        "Corp. ": "corporation "
+    }
+    for key, value in ABBREVIATIONS.items():
+        pattern = fr'(?:^|\b){re.escape(str(key))}(?:\b|$)'
+        text = re.sub(pattern, value, text)
+    return text
+
+def aggressive_split(text):
+    text = text.replace(". ", ".\n")
+    text = text.replace("? ", "?\n")
+    text = text.replace("! ", "!\n")
+    text = text.replace(", ", ",\n")
+    text = text.replace(": ", ":\n")
+    text = text.replace(' – ', " - ")
+    text = text.replace(' - ', " -\n")
+    return text
+
+
+def fix_missing_word_times(asrx_result, audio):
     """
     Find consecutive words that lack start/end times, then
     evenly distribute times between the nearest known timestamps.
@@ -568,6 +697,7 @@ def fix_missing_word_times(asrx_result, total_audio_duration):
         asrx_result (dict): The ASR result dict with a 'word_segments' list.
         total_audio_duration (float): The total duration of the audio in seconds.
     """
+    total_audio_duration = audio.get("audio_length")
     word_segments = asrx_result.get("word_segments", [])
     n_words = len(word_segments)
     if n_words == 0:
@@ -591,9 +721,13 @@ def fix_missing_word_times(asrx_result, total_audio_duration):
             runs.append((start_run, end_run))
         else:
             i += 1
-
+    replacements = []
+    whisperx_asr_model.load_asr_model()
     # 2. For each run, find the boundary times and distribute
     for (start_run, end_run) in runs:
+        replacement = {"indices":list(range(start_run,end_run+1)), "replacements":[]}
+        new_word_segments = []
+
         # The run might be only 1 word or multiple consecutive words.
         run_length = end_run - start_run + 1
 
@@ -625,45 +759,120 @@ def fix_missing_word_times(asrx_result, total_audio_duration):
                 word_segments[idx]["end"] = start_t + increment
             continue
 
-        # 3. Evenly distribute times across the run
+        prompt = " ".join([word.get("word") for word in word_segments[start_run:end_run + 1]])
+        if re.findall(r"\d+", prompt):
+            for attempt in range(5):
+                # look through each index less than start_run from greatest to least for the first index that ends in a punctuation
+                left_index = start_run
+                buffer = 0
+                for i in reversed(range(0, start_run-1)):
+                    left_index = i+1
+                    if word_segments[i].get("word")[-1] in [".", "?", "!"] and word_segments[i + 1].get("start", None):
+                        buffer += 1
+                        if buffer > attempt:
+                            break
+                right_index = end_run
+                buffer = 0
+                for i in range(end_run+1, n_words):
+                    right_index = i
+                    if word_segments[i].get("word")[-1] in [".", "?", "!"] and word_segments[i].get("end", None):
+                        buffer += 1
+                        if buffer > attempt:
+                            break
+
+
+                extra = 0.1
+                clip_left_time = max(0,(word_segments[left_index].get("start", 0) - extra))
+                clip_right_time = min(audio.get("audio_length"),(word_segments[right_index].get("end", audio.get("audio_length")) + extra))
+                # create a clip from the start_time and end_time and pass it to asr
+                clip = audio.get("waveform")[int(clip_left_time * audio.get("sample_rate")):int(clip_right_time * audio.get("sample_rate"))]
+                # resample to 16k
+                if audio["sample_rate"] != 16000:
+                    clip = librosa.resample(
+                        clip, orig_sr=audio["sample_rate"], target_sr=16000
+                    )
+
+
+                #save clip to file name it based on the index
+                sf.write(f"clip_{start_run}.wav", clip, 16000)
+                # def shuffle_digits_in_string(input_string):
+                #     # Function to shuffle digits in a number
+                #     def shuffle_digits(match):
+                #         digits = list(match.group())
+                #         random.shuffle(digits)
+                #         return ''.join(digits)
+                #
+                #     # Find all numbers in the string and shuffle their digits
+                #     result = re.sub(r'\d+', shuffle_digits, input_string)
+                #     return result
+
+                # if attempt == 0:
+                #     whisperx_asr_model.model.options = replace(whisperx_asr_model.model.options, initial_prompt=f'{context}')
+                # # whisperx_asr_model.model.options = replace(whisperx_asr_model.model.options, initial_prompt=f'{shuffle_digits_in_string(prompt)}')
+                # elif end_run - start_run > 0:
+                #     whisperx_asr_model.model.options = replace(whisperx_asr_model.model.options, initial_prompt=f'{shuffle_digits_in_string(prompt)}')
+                # else:
+                #     whisperx_asr_model.model.options = replace(whisperx_asr_model.model.options, initial_prompt=f'{whisperx_asr_model.model.options.initial_prompt} {" ".join(random.sample(["digit", "number", "year", "fraction"], 4))}')
+                numbers = whisperx_asr_model.transcribe_and_align(clip)
+                # whisperx_asr_model.model.options = whisperx_asr_model.options
+                normalized, conversion = replace_numbers_in_text(" ".join([part.get("word") for part in numbers.get("word_segments", [])]))
+                if normalized != prompt:
+                    test_prompt = prompt
+                    # use regex to extract all numbers from the prompt and replace them with the string from the conversion dictionary
+                    for key, value in conversion.items():
+                        # only replace if the value matches the entire number in the prompt
+                        # test_prompt = re.sub(f'\\b{str(value)}\\b', key, test_prompt)
+                        pattern = fr'(?:^|\b){re.escape(str(value))}(?:\b|$)'
+                        test_prompt = re.sub(pattern, key, test_prompt)
+                    if re.findall(r"\d+", test_prompt):
+                        continue
+                    # try to align the normalized text to the original text
+                    for word in numbers.get("word_segments"):
+                        if word.get("start", None) and word.get("end", None):
+                            word["word"] = word["word"].strip(".,!?:'\"")
+                    fixed_words = extract_and_update_sequence(numbers.get("word_segments"),test_prompt)
+                    if " ".join([word.get("word") for word in fixed_words]) != test_prompt:
+                        continue
+                    else:
+                        numbers["word_segments"] = fixed_words
+
+                for word in numbers.get("word_segments"):
+                    if word.get("start", None) and word.get("end", None):
+                        word["start"] = max(0,word["start"] + left_time - extra)
+                        word["end"] = min(audio.get('audio_length'), word["end"] + left_time - extra)
+                        new_word_segments.append(word)
+                replacement["replacements"] = new_word_segments
+                replacements.append(replacement)
+                break
+        # 3. backup option: evenly distribute the times between the boundaries for non-matcher
         interval = right_time - left_time
         segment_length = interval / run_length
-
         for k in range(run_length):
             idx = start_run + k
             # The start = left boundary + k*segment_length
             # The end = left boundary + (k+1)*segment_length
             word_segments[idx]["start"] = left_time + k * segment_length
             word_segments[idx]["end"] = left_time + (k + 1) * segment_length
+    whisperx_asr_model.unload_asr_model()
+    for replacement in reversed(replacements):
+        asrx_result["word_segments"][replacement["indices"][0]:replacement["indices"][-1]+1] = replacement["replacements"]
+    pass
 
-def segment_with_threshold(audio, alignment, output_path, padding, symmetrical=True):
+def segment_with_threshold(audio, alignment, output_path, breath_transcript_tree):
     if not os.path.exists(output_path):
         os.mkdir(output_path)
     filename = os.path.basename(audio.get("path"))
-    length = len(alignment)
     for i in range(len(alignment)):
         try:
             start = alignment[i][1].get("padding_start")
             end = alignment[i][1].get("padding_end")
 
-            left_padding = np.zeros(int(padding * audio.get("sample_rate")))
-            if symmetrical == True or i == length - 1:
-                right_padding = np.zeros(int(padding * audio.get("sample_rate")))
-            else:
-                right_padding = np.zeros(
-                    int(
-                        max(
-                            padding,
-                            (alignment[i + 1][1].get("padding_start") - end - padding),
-                        )
-                        * audio.get("sample_rate")
-                    )
-                )
+            left_padding = np.zeros(int(alignment[i][1].get("left_padding") * audio.get("sample_rate")))
+            right_padding = np.zeros(int(alignment[i][1].get("right_padding") * audio.get("sample_rate")))
 
             # Calculate sample indices
             start_sample = int(start * audio.get("sample_rate"))
             end_sample = int(end * audio.get("sample_rate"))
-
             # Extract the audio segment
             y_segment = audio.get("waveform")[start_sample:end_sample]
 
@@ -672,6 +881,11 @@ def segment_with_threshold(audio, alignment, output_path, padding, symmetrical=T
             alignment[i][1]["filename"] = os.path.join(
                 output_path, f"{filename}.segment.{i}.wav"
             )
+
+            text = get_text_with_breath(breath_transcript_tree, start, end)
+            line = f"{alignment[i][1].get('filename')}|{' '.join(text)}\n"
+            alignment[i][1]["line"] = line
+
             # Save the padded audio segment as a WAV file
             sf.write(
                 os.path.join(output_path, f"{filename}.segment.{i}.wav"),
@@ -681,6 +895,56 @@ def segment_with_threshold(audio, alignment, output_path, padding, symmetrical=T
         except Exception as e:
             logger.error(f"Error processing segment {alignment[i]}")
             logger.error(e)
+
+def segment_with_threshold_expand(audio, alignment, output_path, breath_transcript_tree, train_file, max_len, max_segments):
+    if not os.path.exists(output_path):
+        os.mkdir(output_path)
+    filename = os.path.basename(audio.get("path"))
+    segment_index = 0
+    with open(train_file, "w", encoding="utf-8") as f:
+        for i in range(len(alignment)):
+            group = 0
+            try:
+                start = 0
+                end = .1
+                while end - start <= max_len and i+group < len(alignment) and group < max_segments:
+                    start = alignment[i][1].get("padding_start")
+                    end = alignment[i+group][1].get("padding_end")
+
+                    left_padding_duration = alignment[i][1].get("left_padding")
+                    right_padding_duration = alignment[i+group][1].get("right_padding")
+
+                    if (end - start) + left_padding_duration + right_padding_duration > max_len:
+                        break
+
+                    left_padding = np.zeros(int(left_padding_duration * audio.get("sample_rate")))
+                    right_padding = np.zeros(int(right_padding_duration * audio.get("sample_rate")))
+
+                    # Calculate sample indices
+                    start_sample = int(start * audio.get("sample_rate"))
+                    end_sample = int(end * audio.get("sample_rate"))
+                    # Extract the audio segment
+                    y_segment = audio.get("waveform")[start_sample:end_sample]
+
+                    # Add padding to the segment
+                    y_padded = np.concatenate((left_padding, y_segment, right_padding))
+                    file_name = f"{filename}.segment.{segment_index}.wav"
+
+                    text = get_text_with_breath(breath_transcript_tree, start, end)
+
+                    # Save the padded audio segment as a WAV file
+                    sf.write(
+                        os.path.join(output_path, file_name),
+                        y_padded,
+                        audio.get("sample_rate"),
+                    )
+                    f.write(f"{file_name}|{' '.join(text)}\n")
+
+                    group += 1
+                    segment_index += 1
+            except Exception as e:
+                logger.error(f"Error processing segment {alignment[i]}")
+                logger.error(e)
 
 
 def segment_with_minima(audio, alignment, output_path, padding):
@@ -802,7 +1066,7 @@ if __name__ == "__main__":
 
     whisperx_asr_params = cfg.get("whisperx_asr", {})
     asr_options = {
-        "hotwords": False,
+        "hotwords": None,
         "multilingual": True,
         "suppress_numerals": True,
         "initial_prompt": "Um, Uh, Ah. Like, you know. I mean, right. Actually. Basically, and right? okay. Alright. Emm. So. Oh. 生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!微斯人,吾谁与归?ええと、あの、ま、そう、ええ。äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, eh bien, du coup. genre, comme, style. 응,어,그,음."
@@ -845,6 +1109,10 @@ if __name__ == "__main__":
     logger.debug("Respiro Model loaded")
 
     input_folder_path = cfg.get("general", {}).get("input_folder", "data/audio")
+    print(f"looking in {input_folder_path} for files")
     audio_paths = get_audio_files(input_folder_path)  # Get all audio files
+    print(audio_paths)
     for path in audio_paths:
-        process(cfg, path)
+        completed = process(cfg, path)
+        if not completed:
+            process(cfg, path)

@@ -68,6 +68,7 @@ class WhisperXModel:
             self.asr_options = {}
         else:
             self.asr_options = asr_options
+        self.options = None
 
     def transcribe_and_align(self, audio: np.ndarray):
         result = self.model.transcribe(
@@ -126,11 +127,8 @@ class WhisperXModel:
             language=self.language,
             asr_options=self.asr_options,
         )
-        TranscriptionOptionsNT = namedtuple(
-            TranscriptionOptions.__name__,
-            [field.name for field in fields(TranscriptionOptions)],
-        )
-        modelx.options = TranscriptionOptionsNT(**vars(modelx.options))
+
+        self.options = modelx.options
         model_a, metadata = whisperx.load_align_model(
             language_code=self.language, device=self.device
         )

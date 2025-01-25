@@ -6,7 +6,7 @@ general:
   train_path: data/train # path to save the train file in "segments | transcript" format
   log_level: DEBUG
   device: auto   # can be 'cuda', 'cpu', or 'auto' to detect GPU
-  sample_rate: 44100 # sample rate of the output segments
+  sample_rate: 24000 # sample rate of the output segments
 
 whisperx_asr:
     model: "large-v3"
@@ -17,7 +17,7 @@ whisperx_asr:
     asr_options:
 
 separate_fast:
-    enabled: True
+    enabled: False
     model_path: models/UVR-MDX-NET-Inst_HQ_3.onnx
     denoise: True
     margin: 44100
@@ -25,6 +25,15 @@ separate_fast:
     n_fft: 6144
     dim_t: 8
     dim_f: 3072
+
+normalize_byo_transcript:
+    enabled: True # create a .fixed.txt version of your transcript with digits converted to ground truth text representations and common prefixs replaced
+    aggressive_segment: True # instead of splitting on just ". ", "! ", "? ", also split on " - ", ": ", ", " forcing incomplete sentences
+
+combine_segments:
+    enabled: True # do we want to create more data by combining permutations of adjacent segments (to help the model learn pauses and sentence transitions)
+    max_len: 60.0 # when combining adjacent segments only combine them if the add up to less than this number of seconds
+    max_segments: 2 # as long as we are under the max_len join up to this number of segments
 
 respiro:
     model_path: models/respiro-en.pt
