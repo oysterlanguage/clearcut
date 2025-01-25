@@ -7,60 +7,61 @@ logging.basicConfig(level=logging.WARNING)  # Adjust level as needed
 # Extended mapping with higher magnitude words
 word_mapping = {
     # Basic numbers
-    "zero":      [(0, 1)],
-    "one":       [(1, 1)],
-    "two":       [(2, 1)],
-    "three":     [(3, 1)],
-    "four":      [(4, 1)],
-    "five":      [(5, 1)],
-    "six":       [(6, 1)],
-    "seven":     [(7, 1)],
-    "eight":     [(8, 1)],
-    "nine":      [(9, 1)],
-    "ten":       [(1, 10), (0, 1)],
-    "eleven":    [(1, 10), (1, 1)],
-    "twelve":    [(1, 10), (2, 1)],
-    "thirteen":  [(1, 10), (3, 1)],
-    "fourteen":  [(1, 10), (4, 1)],
-    "fifteen":   [(1, 10), (5, 1)],
-    "sixteen":   [(1, 10), (6, 1)],
+    "zero": [(0, 1)],
+    "one": [(1, 1)],
+    "two": [(2, 1)],
+    "three": [(3, 1)],
+    "four": [(4, 1)],
+    "five": [(5, 1)],
+    "six": [(6, 1)],
+    "seven": [(7, 1)],
+    "eight": [(8, 1)],
+    "nine": [(9, 1)],
+    "ten": [(1, 10), (0, 1)],
+    "eleven": [(1, 10), (1, 1)],
+    "twelve": [(1, 10), (2, 1)],
+    "thirteen": [(1, 10), (3, 1)],
+    "fourteen": [(1, 10), (4, 1)],
+    "fifteen": [(1, 10), (5, 1)],
+    "sixteen": [(1, 10), (6, 1)],
     "seventeen": [(1, 10), (7, 1)],
-    "eighteen":  [(1, 10), (8, 1)],
-    "nineteen":  [(1, 10), (9, 1)],
-    "twenty":    [(2, 10)],
-    "thirty":    [(3, 10)],
-    "forty":     [(4, 10)],
-    "fifty":     [(5, 10)],
-    "sixty":     [(6, 10)],
-    "seventy":   [(7, 10)],
-    "eighty":    [(8, 10)],
-    "ninety":    [(9, 10)],
-    "hundred":   [(1, 100)],
-    "thousand":  [(1, 1000)],
-    "million":   [(1, 10**6)],
-    "billion":   [(1, 10**9)],
-    "trillion":  [(1, 10**12)],
+    "eighteen": [(1, 10), (8, 1)],
+    "nineteen": [(1, 10), (9, 1)],
+    "twenty": [(2, 10)],
+    "thirty": [(3, 10)],
+    "forty": [(4, 10)],
+    "fifty": [(5, 10)],
+    "sixty": [(6, 10)],
+    "seventy": [(7, 10)],
+    "eighty": [(8, 10)],
+    "ninety": [(9, 10)],
+    "hundred": [(1, 100)],
+    "thousand": [(1, 1000)],
+    "million": [(1, 10**6)],
+    "billion": [(1, 10**9)],
+    "trillion": [(1, 10**12)],
     # You can continue up to decillion, googol, etc. as needed...
-    "and":       [],
+    "and": [],
     # Removed "a" from here to avoid the bug
 }
 
 # For fractional words: "half" => 0.5, "quarter" => 0.25, etc.
 pre_process_mapping = {
-    "half":      0.5,
-    "quarter":   0.25,
-    "third":     1/3,
-    "fourth":    0.25,
-    "fifth":     0.2,
-    "sixth":     1/6,
-    "seventh":   1/7,
-    "eighth":    0.125,
-    "ninth":     1/9,
-    "tenth":     0.1
+    "half": 0.5,
+    "quarter": 0.25,
+    "third": 1 / 3,
+    "fourth": 0.25,
+    "fifth": 0.2,
+    "sixth": 1 / 6,
+    "seventh": 1 / 7,
+    "eighth": 0.125,
+    "ninth": 1 / 9,
+    "tenth": 0.1,
 }
 
 large_scales = {"hundred", "thousand", "million", "billion", "trillion"}
 fraction_words = set(pre_process_mapping.keys())  # e.g. "half", "quarter", ...
+
 
 def parse_small_number(tokens):
     """
@@ -82,7 +83,7 @@ def parse_small_number(tokens):
         # --- Special-case handling for "a" ---
         # If "a" is followed by a recognized numeric scale or numeric token, treat "a" as 1.
         # Otherwise, skip it to avoid "a pig" => "1 pig".
-        if word.lower() == 'a':
+        if word.lower() == "a":
             # Look ahead
             next_i = i + 1
             if next_i < len(tokens):
@@ -122,7 +123,7 @@ def parse_small_number(tokens):
             continue
 
         # General handling
-        for (value, scale) in pairs:
+        for value, scale in pairs:
             if scale == 1:
                 # e.g., "two", "one", "nine"
                 if last_scale == 10:
@@ -163,7 +164,7 @@ def parse_number_segment(segment):
     """
     segment = segment.lower()
     segment = re.sub(r"[^\w\s\-]", "", segment)  # remove punctuation except hyphens
-    tokens = segment.replace('-', ' ').split()
+    tokens = segment.replace("-", " ").split()
 
     # "Groups" will break on large scales, so we handle them separately
     groups = []
@@ -217,16 +218,23 @@ def parse_number_segment(segment):
 valid_numeric_words = sorted(
     [w for w, v in word_mapping.items() if v is not None] + ["and"],  # ignoring "a"
     key=len,
-    reverse=True
+    reverse=True,
 )
 
 fraction_keywords = fraction_words.union({"point", "dot"})
 # If someone typed "point" or "dot" we handle decimals
 
-pattern = r'\b(?!and\b)(?:' + '|'.join(re.escape(w) for w in valid_numeric_words) + r')(?:[\-\s]+(?:' + '|'.join(re.escape(w) for w in valid_numeric_words) + r'))*\b'
+pattern = (
+    r"\b(?!and\b)(?:"
+    + "|".join(re.escape(w) for w in valid_numeric_words)
+    + r")(?:[\-\s]+(?:"
+    + "|".join(re.escape(w) for w in valid_numeric_words)
+    + r"))*\b"
+)
 
 # Store global phrase->number mappings if desired
 phrase_to_number = {}
+
 
 def replace_numeric(match):
     """
@@ -285,7 +293,11 @@ def replace_numeric(match):
             # Remove fraction words from the tokens, parse the remainder as the "whole part"
             # so "a half" => skip 'a', skip 'half' from parse_number_segment
             # effectively " " => 0 + 0.5 => 0.5
-            remainder = [t for i, t in enumerate(text_tokens) if i not in fraction_indices and t not in ("a", "an")]
+            remainder = [
+                t
+                for i, t in enumerate(text_tokens)
+                if i not in fraction_indices and t not in ("a", "an")
+            ]
             whole_str = " ".join(remainder)
             whole_value = parse_number_segment(whole_str) if whole_str else 0
 
@@ -317,7 +329,7 @@ def normalize_text(text):
     """
     Lowercase the text and remove punctuation for normalization.
     """
-    return text.lower().translate(str.maketrans('', '', string.punctuation))
+    return text.lower().translate(str.maketrans("", "", string.punctuation))
 
 
 def extract_and_update_sequence(data, target):
@@ -333,9 +345,9 @@ def extract_and_update_sequence(data, target):
     target_index = 0
 
     for entry in data:
-        normalized_entry_word = normalize_text(entry['word'])
+        normalized_entry_word = normalize_text(entry["word"])
         if normalized_entry_word == normalized_target[target_index]:
-            entry['word'] = target_words[target_index]
+            entry["word"] = target_words[target_index]
             matched_entries.append(entry)
             target_index += 1
             if target_index == len(normalized_target):
@@ -368,9 +380,9 @@ def main():
         "eight and three quarters",  # "quarter" is 0.25 in your mapping
         "two point nine five",
         "one hundred point nine two six three",
-        "a pig",                 # Test the fix: should remain "a pig", not "1 pig"
-        "a thousand",           # Should become 1000
-        "a half",               # Depending on logic, you may want 0.5
+        "a pig",  # Test the fix: should remain "a pig", not "1 pig"
+        "a thousand",  # Should become 1000
+        "a half",  # Depending on logic, you may want 0.5
     ]
 
     for phrase in test_phrases:
