@@ -1,7 +1,8 @@
 # config.yaml
 general:
   debug: false
-  input_folder: data/audio # path to the input audio files
+  input_folder:
+    - /path/to/audio/folder
   output_path: data/segments # path to save the output segments
   train_path: data/train # path to save the train file in "segments | transcript" format
   log_level: DEBUG
@@ -28,12 +29,13 @@ separate_fast:
 
 normalize_byo_transcript:
     enabled: True # create a .fixed.txt version of your transcript with digits converted to ground truth text representations and common prefixs replaced
-    aggressive_segment: True # instead of splitting on just ". ", "! ", "? ", also split on " - ", ": ", ", " forcing incomplete sentences
+    aggressive_segment: False # instead of splitting on just ". ", "! ", "? ", also split on " - ", ": ", ", " forcing incomplete sentences
 
 combine_segments:
     enabled: True # do we want to create more data by combining permutations of adjacent segments (to help the model learn pauses and sentence transitions)
-    max_len: 60.0 # when combining adjacent segments only combine them if the add up to less than this number of seconds
-    max_segments: 2 # as long as we are under the max_len join up to this number of segments
+    max_len: 30.0  # when combining adjacent segments only combine them if the add up to less than this number of seconds
+    max_segments: 1 # as long as we are under the max_len join up to this number of segments
+    db_std_dev_limit: 2 # This parameter defines the maximum allowable standard deviation of decibel (dB) levels at a potential cut point when compared to the rest of the cuts. If the standard deviation of the dB levels at the selected timestamp exceeds this limit, the cut will be skipped to avoid clipping during a region of high variability in audio intensity. This helps ensure cleaner segmentation by avoiding cuts in areas with significant noise, abrupt changes, or inconsistencies.
 
 respiro:
     model_path: models/respiro-en.pt

@@ -20,6 +20,7 @@ import random
 import re
 from difflib import SequenceMatcher
 from number_normalizer import replace_numbers_in_text, extract_and_update_sequence
+import json
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -410,7 +411,7 @@ def process(config, audio_path):
         and original_text != ""
     ):
         logger.info("step 5: Fixing missing word start and end times")
-        fix_missing_word_times(asrx_result, audio)
+        fix_missing_word_times_numbers(asrx_result, audio)
 
         text = " ".join([word.get("word") for word in asrx_result.get("word_segments")])
         # text = normalize_text(text)
@@ -423,6 +424,8 @@ def process(config, audio_path):
             )
             f.write(fixed_text)
         return False
+    else:
+        fix_missing_word_times(asrx_result, audio)
 
     segments = asrx_result["segments"]
     # joined_segments = []
@@ -545,13 +548,42 @@ def process(config, audio_path):
         )
     mixed = breaths | word_intervals
 
+    # Calculate Possible Miss timed cuts
+    edge_db = [segment[1]["lowest"]["start"]["db"] for segment in alignment] + [
+        segment[1]["lowest"]["end"]["db"] for segment in alignment
+    ]
+    if len(edge_db) > 1:
+        mean = statistics.mean(edge_db)
+        std_dev = statistics.stdev(edge_db)
+    else:
+        mean = 0
+        std_dev = 1
+
+    # # we may want to join on loud splits
+    # possible_edge_misses = [
+    #     segment
+    #     for segment in alignment
+    #     if segment[1]["lowest"]["start"]["db"] > (mean + (std_dev * 3))
+    #     or segment[1]["lowest"]["end"]["db"] > (mean + (std_dev * 3))
+    # ]
+    db_std_dev_limit = config.get("combine_segments", {}).get("db_std_dev_limit", 3)
+    for segment in alignment:
+        segment[1]["bad_left_cut"] = segment[1]["lowest"]["start"]["db"] > (mean + (std_dev * db_std_dev_limit))
+        segment[1]["bad_right_cut"] = segment[1]["lowest"]["end"]["db"] > (mean + (std_dev * db_std_dev_limit))
+
+    # print(
+    #     f"These segments end unusually loud and could cause clipping: {possible_edge_misses}"
+    # )
+
+
     train_path = config.get("general", {}).get("train_path", "data/train")
     if not os.path.exists(train_path):
         os.makedirs(train_path)
-
     audio_file_name = os.path.basename(audio_path)
     train_file = os.path.join(train_path, f"{audio_file_name}.train.txt")
 
+    # Save segments and training file
+    logger.info("Saving Segments")
     if config.get("combine_segments", {}).get("enabled", False):
         max_len = config.get("combine_segments", {}).get("max_len", 30)
         max_segments = config.get("combine_segments", {}).get("max_segments", 2)
@@ -597,28 +629,34 @@ def process(config, audio_path):
     print(
         f"These breaths are unusually quiet and could affect alignment: {possible_breath_misses}"
     )
-
-    edge_db = [segment[1]["lowest"]["start"]["db"] for segment in alignment] + [
-        segment[1]["lowest"]["end"]["db"] for segment in alignment
-    ]
-    if len(edge_db) > 1:
-        mean = statistics.mean(edge_db)
-        std_dev = statistics.stdev(edge_db)
-    else:
-        mean = 0
-        std_dev = 1
-
-    # we may want to join on loud splits
-    possible_edge_misses = [
-        segment
-        for segment in alignment
-        if segment[1]["lowest"]["start"]["db"] > (mean + (std_dev * 3))
-        or segment[1]["lowest"]["end"]["db"] > (mean + (std_dev * 3))
-    ]
-    print(
-        f"These segments end unusually loud and could cause clipping: {possible_edge_misses}"
-    )
-
+    with open (f"{audio_path}.dump.json", "w", encoding="utf-8") as f:
+        dump = {
+                "words": asrx_result.get("word_segments"),
+                "breaths": [
+                    {"start": breath.begin, "end": breath.end, "word": "breath"}
+                    for breath in breaths
+                ],
+                "whisperx": [
+                    {
+                        "start": segment[0]["start"],
+                        "end": segment[0]["end"],
+                        "word": segment[0]["text"],
+                    }
+                    for segment in alignment
+                ],
+                "uroman": [
+                    {
+                        "start": segment[1]["start"],
+                        "end": segment[1]["end"],
+                        "word": segment[1]["text"],
+                    }
+                    for segment in alignment
+                ],
+                "split_ranges": [
+                    {"start": x.begin, "end": x.end, "word": "range"} for x in ranges
+                ],
+            }
+        json.dump(dump, f, indent=4)
     if config.get("create_textgrid", {}).get("enabled", False):
         logger.info("Step 5: Create TextGrid")
         create_textgrid(
@@ -700,12 +738,77 @@ def aggressive_split(text):
     text = text.replace("! ", "!\n")
     text = text.replace(", ", ",\n")
     text = text.replace(": ", ":\n")
+    text = text.replace("; ", ";\n")
     text = text.replace(" – ", " - ")
     text = text.replace(" - ", " -\n")
+    # Alignment does not work great with digits at the end or start of a sequence this will merge those lines.
+    # Remove \n after digits followed by punctuation
+    text = re.sub(r"(\d[.?!,:;-])\n", r"\1 ", text)
+
+    # Remove \n immediately followed by a digit
+    text = re.sub(r"\n(\d)", r" \1", text)
+
     return text
 
-
 def fix_missing_word_times(asrx_result, audio):
+    total_audio_duration = audio.get("audio_length")
+    word_segments = asrx_result.get("word_segments", [])
+    n_words = len(word_segments)
+    if n_words == 0:
+        return  # nothing to fix
+
+    # 1. Collect consecutive runs of missing times.
+    #    A "run" is defined as consecutive words that are missing either "start" or "end".
+    runs = []
+    i = 0
+    while i < n_words:
+        # Check if current word is missing times
+        current_missing = ("start" not in word_segments[i]) or (
+            "end" not in word_segments[i]
+        )
+        if current_missing:
+            start_run = i
+            # move i until we find a word that has both "start" and "end"
+            while i < n_words and (
+                ("start" not in word_segments[i]) or ("end" not in word_segments[i])
+            ):
+                i += 1
+            end_run = i - 1
+            runs.append((start_run, end_run))
+        else:
+            i += 1
+    for start_run, end_run in runs:
+
+        # The run might be only 1 word or multiple consecutive words.
+        run_length = end_run - start_run + 1
+
+        # 2a. Find the boundary on the left
+        #     If there's a previous word that has a valid 'end', use that.
+        #     Otherwise, fallback to 0.0
+        if start_run > 0 and "end" in word_segments[start_run - 1]:
+            left_time = word_segments[start_run - 1]["end"]
+        else:
+            left_time = 0.0
+
+        # 2b. Find the boundary on the right
+        #     If there's a next word that has a valid 'start', use that.
+        #     Otherwise, fallback to total_audio_duration
+        if end_run < n_words - 1 and "start" in word_segments[end_run + 1]:
+            right_time = word_segments[end_run + 1]["start"]
+        else:
+            right_time = total_audio_duration
+
+        # 3. backup option: evenly distribute the times between the boundaries for non-matcher
+        interval = right_time - left_time
+        segment_length = interval / run_length
+        for k in range(run_length):
+            idx = start_run + k
+            # The start = left boundary + k*segment_length
+            # The end = left boundary + (k+1)*segment_length
+            asrx_result["word_segments"][idx]["start"] = left_time + k * segment_length
+            asrx_result["word_segments"][idx]["end"] = left_time + (k + 1) * segment_length
+
+def fix_missing_word_times_numbers(asrx_result, audio):
     """
     Find consecutive words that lack start/end times, then
     evenly distribute times between the nearest known timestamps.
@@ -904,8 +1007,8 @@ def fix_missing_word_times(asrx_result, audio):
             idx = start_run + k
             # The start = left boundary + k*segment_length
             # The end = left boundary + (k+1)*segment_length
-            word_segments[idx]["start"] = left_time + k * segment_length
-            word_segments[idx]["end"] = left_time + (k + 1) * segment_length
+            asrx_result["word_segments"][idx]["start"] = left_time + k * segment_length
+            asrx_result["word_segments"][idx]["end"] = left_time + (k + 1) * segment_length
     whisperx_asr_model.unload_asr_model()
     for replacement in reversed(replacements):
         asrx_result["word_segments"][
@@ -970,7 +1073,7 @@ def segment_with_threshold_expand(
         os.mkdir(output_path)
     filename = os.path.basename(audio.get("path"))
     segment_index = 0
-    with open(train_file, "w", encoding="utf-8") as f:
+    with open(train_file, "w", encoding="utf-8") as f, open(f"{train_file}.bad", "w", encoding="utf-8") as bad_f:
         for i in range(len(alignment)):
             group = 0
             try:
@@ -988,6 +1091,8 @@ def segment_with_threshold_expand(
                     right_padding_duration = alignment[i + group][1].get(
                         "right_padding"
                     )
+                    bad_left_cut = alignment[i][1].get("bad_left_cut")
+                    bad_right_cut = alignment[i + group][1].get("bad_right_cut")
 
                     if (
                         end - start
@@ -1019,7 +1124,10 @@ def segment_with_threshold_expand(
                         y_padded,
                         audio.get("sample_rate"),
                     )
-                    f.write(f"{file_name}|{' '.join(text)}\n")
+                    if bad_left_cut or bad_right_cut:
+                        bad_f.write(f"{file_name}|{' '.join(text)}\n")
+                    else:
+                        f.write(f"{file_name}|{' '.join(text)}\n")
 
                     group += 1
                     segment_index += 1
@@ -1192,10 +1300,15 @@ if __name__ == "__main__":
     logger.debug("Respiro Model loaded")
 
     input_folder_path = cfg.get("general", {}).get("input_folder", "data/audio")
-    print(f"looking in {input_folder_path} for files")
-    audio_paths = get_audio_files(input_folder_path)  # Get all audio files
-    print(audio_paths)
-    for path in audio_paths:
+    audio_paths = []
+    if type(input_folder_path) == list:
+        for folder in input_folder_path:
+            print(f"looking in {folder} for files")
+            audio_paths += get_audio_files(folder)
+    #print(f"looking in {input_folder_path} for files")
+    #audio_paths = get_audio_files(input_folder_path)  # Get all audio files
+    print(sorted(audio_paths))
+    for path in sorted(audio_paths):
         completed = process(cfg, path)
         if not completed:
             process(cfg, path)
